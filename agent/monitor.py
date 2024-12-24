@@ -1,5 +1,25 @@
 from bcc import BPF
 from time import time
+import duckdb
+
+# Create a DuckDB connection
+db = duckdb.connect()
+
+# Create a table that will store our process lifecycle events
+db.execute("CREATE SEQUENCE id_sequence START 1")
+db.execute("""
+    CREATE TABLE metrics_stream (
+        id INTEGER DEFAULT nextval('id_sequence'),
+        pid UINTEGER,
+        ppid UINTEGER,
+        time UBIGINT,
+        command VARCHAR,
+        type VARCHAR,
+        arguments VARCHAR
+    )
+""")
+
+
 
 bpf_code = """
 #include <uapi/linux/ptrace.h>
@@ -232,7 +252,20 @@ partial_commands = {}
 print("%-9s %-6s %-6s %-16s %-25s %s" % (
     "TIME", "PID", "PPID", "COMM", "EVENT", "DETAILS"))
 
-def print_event(cpu, data, size):
+
+def store_event(time, pid, ppid, command, type, details):
+    print("%-9d %-6d %-6d %-16s %-25s %s" % (
+        time,
+        pid,
+        ppid,
+        command,
+        type,
+        details)   
+    )
+    db.execute(f" INSERT INTO metrics_stream VALUES (DEFAULT, {time}, {pid}, {ppid}, '{command}', '{type}', '{details}')")
+
+
+def process_event(cpu, data, size):
     event = b["events"].event(data)
     
     if event.is_exec_event:
@@ -249,13 +282,7 @@ def print_event(cpu, data, size):
             if event.pid in partial_commands:
                 cmd_info = partial_commands[event.pid]
                 full_command = ' '.join(cmd_info['parts'])
-                print("%-9d %-6d %-6d %-16s %-25s %s" % (
-                    int(time()),
-                    event.pid,
-                    cmd_info['ppid'],
-                    cmd_info['comm'],
-                    "EXECVE",
-                    full_command))
+                store_event(int(time()), event.pid, cmd_info['ppid'], cmd_info['comm'], "EXECVE", full_command)
                 del partial_commands[event.pid]
     else:
         # Handle process lifecycle events
@@ -267,38 +294,17 @@ def print_event(cpu, data, size):
             comm = "<decode error>"
         if event.end_time:
             duration_ms = (event.end_time - event.start_time) / 1000000
-            print("%-9d %-6d %-6d %-16s %-25s Duration: %.2fms" % (
-                int(time()),
-                event.pid,
-                event.ppid,
-                event.comm.decode(),
-                "EXIT",
-                duration_ms))
+            store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "EXIT", duration_ms)
         elif event.mem_size:
-            print("%-9d %-6d %-6d %-16s %-25s %.2fkb" % (
-                int(time()),
-                event.pid,
-                event.ppid,
-                event.comm.decode(),
-                "MEM",
-                event.mem_size / 1024))
+            size_kb = event.mem_size / 1024
+            store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "MEM", size_kb)
         elif event.cpu_time:
-            print("%-9d %-6d %-6d %-16s %-25s %.2fms" % (
-                int(time()),
-                event.pid,
-                event.ppid,
-                event.comm.decode(),
-                "CPU",
-                event.cpu_time / 1000000))
+            cpu_allocation = event.cpu_time
+            store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "CPU", cpu_allocation)
         else:
-            print("%-9d %-6d %-6d %-16s %-25s" % (
-                int(time()),
-                event.pid,
-                event.ppid,
-                comm,
-                "START"))
+            store_event(int(time()), event.pid, event.ppid, comm, "START", "")
 
-b["events"].open_perf_buffer(print_event)
+b["events"].open_perf_buffer(process_event)
 print("Tracing process events... Ctrl+C to quit.")
 while True:
     try:
