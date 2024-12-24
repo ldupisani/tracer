@@ -116,6 +116,41 @@ int do_ret_sys_execve(struct pt_regs *ctx)
     return 0;
 }
 
+// CREATE A RATE LIMITER
+
+#define RATE_LIMIT 16    
+#define BURST_LIMIT 32
+#define NS_PER_SEC 1000000000ULL
+
+struct rate_limit {
+    u64 tokens;
+    u64 last_time;
+};
+
+BPF_HASH(rate_limiter, u32, struct rate_limit, 100);
+
+static __always_inline bool check_rate_limit(u32 pid) {
+    u64 now = bpf_ktime_get_ns();
+    struct rate_limit new_rl = {};
+    struct rate_limit *rl = rate_limiter.lookup_or_try_init(&pid, &new_rl);
+    if (!rl)
+        return false;
+
+    u64 elapsed = now - rl->last_time;
+    u64 tokens = rl->tokens + elapsed * RATE_LIMIT / NS_PER_SEC;
+    tokens = tokens > BURST_LIMIT ? BURST_LIMIT : tokens;
+
+    if (tokens >= 1) {
+        rl->tokens = tokens - 1;
+        rl->last_time = now;
+        return true;
+    }
+    
+    rl->tokens = 0;
+    rl->last_time = now;
+    return false;
+}
+
 // CPU TIME MONITORING
 
 struct key_t {
@@ -135,6 +170,10 @@ TRACEPOINT_PROBE(sched, sched_switch) {
     
     // Get PID and command
     key.pid = args->prev_pid;
+
+    if (!check_rate_limit(key.pid))
+        return 0;
+
     bpf_probe_read_kernel(&key.comm, sizeof(key.comm), args->prev_comm);
     
     // Calculate CPU time
@@ -172,8 +211,11 @@ BPF_HASH(mem_stats, u32, struct mem_info);
 
 TRACEPOINT_PROBE(kmem, kmalloc) {
     u32 pid = bpf_get_current_pid_tgid() >> 32;
+    if (!check_rate_limit(pid))
+        return 0;
+
     struct mem_info *info, zero = {};
-    
+
     info = mem_stats.lookup_or_try_init(&pid, &zero);
     if (info) {
         info->total_size += args->bytes_alloc;
@@ -200,6 +242,9 @@ TRACEPOINT_PROBE(kmem, kmalloc) {
 
 TRACEPOINT_PROBE(kmem, kfree) {
     u32 pid = bpf_get_current_pid_tgid() >> 32;
+    if (!check_rate_limit(pid))
+        return 0;
+
     struct mem_info *info = mem_stats.lookup(&pid);
     if (info) {
         // For kfree, we can only track the count of deallocations
@@ -251,22 +296,24 @@ db.execute("""
         time UBIGINT,
         command VARCHAR,
         type VARCHAR,
+        metric UBIGINT,
         arguments VARCHAR
     )
 """)
 
-print("%-9s %-6s %-6s %-16s %-25s %s" % ("TIME", "PID", "PPID", "COMM", "EVENT", "DETAILS"))
+print("%-9s %-6s %-6s %-16s %-25s %s %s" % ("TIME", "PID", "PPID", "COMM", "EVENT", "METRIC", "DETAILS"))
 
-def store_event(time, pid, ppid, command, type, details):
-    print("%-9d %-6d %-6d %-16s %-25s %s" % (
-        time,
-        pid,
-        ppid,
-        command,
-        type,
-        details)   
-    )
-    db.execute(f" INSERT INTO metrics_stream VALUES (DEFAULT, {time}, {pid}, {ppid}, '{command}', '{type}', '{details}')")
+def store_event(time, pid, ppid, command, type, metric, details):
+    # print("%-9d %-6d %-6d %-16s %-25s %d %s" % (
+    #     time,
+    #     pid,
+    #     ppid,
+    #     command,
+    #     type,
+    #     metric,
+    #     details)   
+    # )
+    db.execute(f" INSERT INTO metrics_stream VALUES (DEFAULT, {time}, {pid}, {ppid}, '{command}', '{type}', {metric}, '{details}')")
 
 
 def process_event(cpu, data, size):
@@ -286,7 +333,7 @@ def process_event(cpu, data, size):
             if event.pid in partial_commands:
                 cmd_info = partial_commands[event.pid]
                 full_command = ' '.join(cmd_info['parts'])
-                store_event(int(time()), event.pid, cmd_info['ppid'], cmd_info['comm'], "EXECVE", full_command)
+                store_event(int(time()), event.pid, cmd_info['ppid'], cmd_info['comm'], "EXECVE", 0, full_command)
                 del partial_commands[event.pid]
     else:
         # Handle process lifecycle events
@@ -297,21 +344,23 @@ def process_event(cpu, data, size):
         except:
             comm = "<decode error>"
         if event.end_time:
-            duration_ms = (event.end_time - event.start_time) / 1000000
-            store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "EXIT", duration_ms)
+            duration = (event.end_time - event.start_time)
+            # duration_ms = duration / 1000000
+            store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "EXIT", duration, "")
         elif event.mem_size:
-            size_kb = event.mem_size / 1024
-            store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "MEM", size_kb)
+            size = event.mem_size;
+            # size_kb = event.mem_size / 1024
+            store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "MEM", size, "")
         elif event.cpu_time:
             cpu_allocation = event.cpu_time
-            store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "CPU", cpu_allocation)
+            store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "CPU", cpu_allocation, "")
         else:
-            store_event(int(time()), event.pid, event.ppid, comm, "START", "")
+            store_event(int(time()), event.pid, event.ppid, comm, "START", 0, "")
 
 def persist_metrics():
     db.execute("COPY metrics_stream TO 'metrics_stream.parquet' (FORMAT 'parquet', CODEC 'zstd')")
 
-b["events"].open_perf_buffer(process_event)
+b["events"].open_perf_buffer(process_event, page_cnt=16384)
 print("Tracing process events... Ctrl+C to quit.")
 while True:
     try:

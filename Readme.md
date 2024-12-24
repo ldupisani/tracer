@@ -4,6 +4,7 @@ The following tools need to be installed and created on an Ubuntu installation f
 
 - sudo apt install libbpfcc-dev python3-bpfcc bpfcc-tools
 - sudo apt install linux-tools-common linux-tools-generic
+- sudo apt install -y libelf-dev zlib1g-dev libbpf-dev
 - bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
 
 ### duckdb python setup for Ubuntu
@@ -104,3 +105,9 @@ It's ok to also keep track of background tasks that pop up during this time, sin
 I created this new simplified single monitor, that will raise lifecycle events. But will also raise memory events whenever there is allocation or dealocation of memory in a process, and will also report back on current resource usage in the correct order.
 
 When the monitor is terminated it writes the metrics to a parquet file for further analysis.
+
+# 3. Query Validation
+
+## Execution Time Analysis
+
+## Query Validation

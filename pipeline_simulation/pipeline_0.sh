@@ -1,1 +1,2 @@
-timeout 3s vmstat -n 1
+ls -la /bin
+ls -la /etc
