@@ -1,10 +1,14 @@
 from bcc import BPF
-from time import sleep, time
+from time import time
 
 bpf_code = """
 #include <uapi/linux/ptrace.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
+#include <linux/mm_types.h>
+#include <linux/mm.h>
+
+// PROCESS LIFECYCLE MONITORING
 
 #define ARGSIZE  128
 #define MAXARG   20
@@ -14,6 +18,8 @@ struct data_t {
     u32 ppid;
     u64 start_time;
     u64 end_time;
+    u64 cpu_time;
+    u64 mem_size;
     char comm[TASK_COMM_LEN];
     char argdata[ARGSIZE];
     int retval;
@@ -30,6 +36,7 @@ TRACEPOINT_PROBE(sched, sched_process_exec) {
     
     data.pid = pid;
     data.start_time = bpf_ktime_get_ns();
+    data.cpu_time = 0;
     bpf_get_current_comm(&data.comm, sizeof(data.comm));
     
     struct task_struct *task;
@@ -103,6 +110,117 @@ int do_ret_sys_execve(struct pt_regs *ctx)
     events.perf_submit(ctx, &data, sizeof(data));
     return 0;
 }
+
+// CPU TIME MONITORING
+
+struct key_t {
+    u32 pid;
+    char comm[TASK_COMM_LEN];
+};
+
+struct cpu_val {
+    u64 cpu_time;
+};
+
+BPF_HASH(cpu_stats, struct key_t, struct cpu_val);
+
+TRACEPOINT_PROBE(sched, sched_switch) {
+    struct key_t key = {};
+    u64 cpu_time;
+    
+    // Get PID and command
+    key.pid = args->prev_pid;
+    bpf_probe_read_kernel(&key.comm, sizeof(key.comm), args->prev_comm);
+    
+    // Calculate CPU time
+    struct cpu_val *val, zero = {};
+    val = cpu_stats.lookup_or_try_init(&key, &zero);
+    if (val) {
+        val->cpu_time += bpf_ktime_get_ns();
+        u64 *start_ts = start_times.lookup(&key.pid);
+        if (start_ts) {
+            struct data_t data = {};
+            data.pid = key.pid;
+            data.cpu_time = val->cpu_time;
+            data.start_time = *start_ts;
+            bpf_get_current_comm(&data.comm, sizeof(data.comm));
+
+            struct task_struct *task;
+            task = (struct task_struct *)bpf_get_current_task();
+            data.ppid = task->real_parent->tgid;
+
+            events.perf_submit(args, &data, sizeof(data));
+        }
+    }
+    return 0;
+}
+
+// MEMORY MONITORING
+
+struct mem_info {
+    u64 total_size;    
+    u64 allocations;   
+    char comm[TASK_COMM_LEN];
+};
+
+BPF_HASH(mem_stats, u32, struct mem_info);
+
+TRACEPOINT_PROBE(kmem, kmalloc) {
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    struct mem_info *info, zero = {};
+    
+    info = mem_stats.lookup_or_try_init(&pid, &zero);
+    if (info) {
+        info->total_size += args->bytes_alloc;
+        info->allocations++;
+        bpf_get_current_comm(&info->comm, sizeof(info->comm));
+
+        u64 *start_ts = start_times.lookup(&pid);
+        if (start_ts) {
+            struct data_t data = {};
+            data.pid = pid;
+            data.mem_size = info->total_size;
+            data.start_time = *start_ts;
+            bpf_get_current_comm(&data.comm, sizeof(data.comm));
+
+            struct task_struct *task;
+            task = (struct task_struct *)bpf_get_current_task();
+            data.ppid = task->real_parent->tgid;
+
+            events.perf_submit(args, &data, sizeof(data));
+        }
+    }
+    return 0;
+}
+
+TRACEPOINT_PROBE(kmem, kfree) {
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    struct mem_info *info = mem_stats.lookup(&pid);
+    if (info) {
+        // For kfree, we can only track the count of deallocations
+        if (info->allocations > 0) {
+            info->allocations--;
+        }
+
+        u64 *start_ts = start_times.lookup(&pid);
+        if (start_ts) {
+            struct data_t data = {};
+            data.pid = pid;
+            data.mem_size = info->total_size;
+            data.start_time = *start_ts;
+            bpf_get_current_comm(&data.comm, sizeof(data.comm));
+
+            struct task_struct *task;
+            task = (struct task_struct *)bpf_get_current_task();
+            data.ppid = task->real_parent->tgid;
+
+            events.perf_submit(args, &data, sizeof(data));
+        }
+    }
+    return 0;
+}
+
+
 """
 
 b = BPF(text=bpf_code)
@@ -156,6 +274,22 @@ def print_event(cpu, data, size):
                 event.comm.decode(),
                 "EXIT",
                 duration_ms))
+        elif event.mem_size:
+            print("%-9d %-6d %-6d %-16s %-25s %.2fkb" % (
+                int(time()),
+                event.pid,
+                event.ppid,
+                event.comm.decode(),
+                "MEM",
+                event.mem_size / 1024))
+        elif event.cpu_time:
+            print("%-9d %-6d %-6d %-16s %-25s %.2fms" % (
+                int(time()),
+                event.pid,
+                event.ppid,
+                event.comm.decode(),
+                "CPU",
+                event.cpu_time / 1000000))
         else:
             print("%-9d %-6d %-6d %-16s %-25s" % (
                 int(time()),

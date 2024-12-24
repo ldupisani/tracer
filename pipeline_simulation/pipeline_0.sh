@@ -1,0 +1,1 @@
+timeout 3s vmstat -n 1

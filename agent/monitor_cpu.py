@@ -45,7 +45,7 @@ print("%-6s %-16s %s" % ("PID", "COMM", "CPU TIME(ms)"))
 # Print CPU stats
 while True:
     try:
-        sleep(1)
+        sleep(1) # TODO: 1 second, but process could be completed in less time than that
         for k, v in b["cpu_stats"].items():
             print("%-9s %-6d %-16s %d" % (
                 strftime("%H:%M:%S"),

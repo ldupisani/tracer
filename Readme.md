@@ -1,3 +1,20 @@
+# 0. Prerequisites
+
+The following tools need to be installed and created on an Ubuntu installation for these programs to work:
+
+- sudo apt install libbpfcc-dev python3-bpfcc bpfcc-tools
+- sudo apt install linux-tools-common linux-tools-generic
+- bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+
+### duckdb python setup for Ubuntu
+
+We need to run bcc in Python as sudo, but duckdb doesn't like to be installed outside a virtual environement, and its difficult to do the bpf setup inside of a virtual environment. Also there isn't a Python library that can be installed via pip for Ubuntu, so we have to do the setup ourselves:
+
+- sudo apt -y install python3-pybind11
+- git clone https://github.com/duckdb/duckdb.git
+- cd duckdb/tools/pythonpkg
+- sudo python3 setup.py install
+
 # 1. Pipelines simulation and signal collection
 
 ## Pipeline Simulation
@@ -12,14 +29,6 @@ TODO: The next step is to creatier heftier processes that are easier to identify
 ## Signal Collection
 
 I created individual signal collection test programs to identify the probes I will combine in my agent software at a later stage.
-
-### Prerequisites
-
-The following tools need to be installed and created on an Ubuntu installation for these programs to work:
-
-- sudo apt install libbpfcc-dev python3-bpfcc bpfcc-tools
-- sudo apt install linux-tools-common linux-tools-generic
-- bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
 
 ### signals.py
 
@@ -43,7 +52,7 @@ This tool gives more information about a process and its arguments:
 
 ## Metrics Collection
 
-These are individual metric colleciton programs.
+These are individual metric colleciton programs I created to monitor system usage of processes.
 
 ### cpu.py
 
@@ -63,9 +72,9 @@ Streams current memory usage metrics at fixed intervals. It's questionable that 
 
 # 2. Agent Architecture
 
-## Processing
+## Processing (Idea 1)
 
-There is a natural split between the datasets. I will keep one program to monitor lifecycle events, and create two other programs to monitor cpu and memory
+The initial idea was to three individual monitoring programs, output their values and then combine them later.
 
 ### monitor_lifecycle.py
 
@@ -78,3 +87,18 @@ Monitors the cpu usage information asynchronously to build a graph of resources.
 ### monitor_mem.py
 
 Monitors the memory usage information asynchronously to build a graph of resources. This can be useful at a later stage to help identify issues like memory leaks.
+
+## Processing (Idea2)
+
+There are a couple of problems with splitting out the monitoring programs:
+
+- If you poll for memory and cpu stats at an interval a process could start and stop without ever reporting these statistics.
+- You create an overcomplicated structure to filter out irrelevant processes that aren't running during your pipeline.
+
+### monitor.py
+
+This is a much simpler solution. Assuming that you only start the monitoring agent whenever you start a pipeline job. You can track only those binaries that run while the pipeline is running. I.e when CPU or Memory stats change, check to see if the PID matches a process we are currently tracking first.
+
+It's ok to also keep track of background tasks that pop up during this time, since interfering processes my also lead to failures in the pipeline. Think for example about a scheduled task that runs in the background, consumes all resources and causes your pipeline to fail.
+
+I created this new simplified single monitor, that will raise lifecycle events. But will also raise memory events whenever there is allocation or dealocation of memory in a process, and will also report back on current resource usage in the correct order.
