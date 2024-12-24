@@ -102,3 +102,5 @@ This is a much simpler solution. Assuming that you only start the monitoring age
 It's ok to also keep track of background tasks that pop up during this time, since interfering processes my also lead to failures in the pipeline. Think for example about a scheduled task that runs in the background, consumes all resources and causes your pipeline to fail.
 
 I created this new simplified single monitor, that will raise lifecycle events. But will also raise memory events whenever there is allocation or dealocation of memory in a process, and will also report back on current resource usage in the correct order.
+
+When the monitor is terminated it writes the metrics to a parquet file for further analysis.

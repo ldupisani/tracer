@@ -2,24 +2,9 @@ from bcc import BPF
 from time import time
 import duckdb
 
-# Create a DuckDB connection
-db = duckdb.connect()
-
-# Create a table that will store our process lifecycle events
-db.execute("CREATE SEQUENCE id_sequence START 1")
-db.execute("""
-    CREATE TABLE metrics_stream (
-        id INTEGER DEFAULT nextval('id_sequence'),
-        pid UINTEGER,
-        ppid UINTEGER,
-        time UBIGINT,
-        command VARCHAR,
-        type VARCHAR,
-        arguments VARCHAR
-    )
-""")
-
-
+# SYSTEM LEVEL PROCESS MONITORING
+# This code does most of the heavy lifting for process monitoring.
+# The amount of events it raises shoudl be constrained by the PIDs that run during pipeline execution.
 
 bpf_code = """
 #include <uapi/linux/ptrace.h>
@@ -249,9 +234,28 @@ b.attach_kretprobe(event=b.get_syscall_fnname("execve"), fn_name="do_ret_sys_exe
 
 partial_commands = {}
 
-print("%-9s %-6s %-6s %-16s %-25s %s" % (
-    "TIME", "PID", "PPID", "COMM", "EVENT", "DETAILS"))
+# SEQUENCED EVENT LOG
+# We are using an in memory duckcb database to store all trace events in sequence.
+# This will be output to parquet files for ingestion and and analysis in further stages of the pipeline.
 
+# Create a DuckDB connection
+db = duckdb.connect()
+
+# Create a table that will store our process lifecycle events
+db.execute("CREATE SEQUENCE id_sequence START 1")
+db.execute("""
+    CREATE TABLE metrics_stream (
+        id INTEGER DEFAULT nextval('id_sequence'),
+        pid UINTEGER,
+        ppid UINTEGER,
+        time UBIGINT,
+        command VARCHAR,
+        type VARCHAR,
+        arguments VARCHAR
+    )
+""")
+
+print("%-9s %-6s %-6s %-16s %-25s %s" % ("TIME", "PID", "PPID", "COMM", "EVENT", "DETAILS"))
 
 def store_event(time, pid, ppid, command, type, details):
     print("%-9d %-6d %-6d %-16s %-25s %s" % (
@@ -304,10 +308,15 @@ def process_event(cpu, data, size):
         else:
             store_event(int(time()), event.pid, event.ppid, comm, "START", "")
 
+def persist_metrics():
+    db.execute("COPY metrics_stream TO 'metrics_stream.parquet' (FORMAT 'parquet', CODEC 'zstd')")
+
 b["events"].open_perf_buffer(process_event)
 print("Tracing process events... Ctrl+C to quit.")
 while True:
     try:
         b.perf_buffer_poll()
     except KeyboardInterrupt:
+        persist_metrics()
+        db.close()
         exit()
