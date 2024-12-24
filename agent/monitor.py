@@ -2,6 +2,16 @@ from bcc import BPF
 from time import time
 import duckdb
 
+# TODO: Filter ps and shell script commands
+# ex:
+# ('exe_1.sh ', 822497029.0)
+# ('pipeline_1.sh ', 688261024.884058)
+# ('pipeline_1.sh ./pipeline_1.sh', 592881864.3870968)
+# ('ps /usr/bin/ps aux', 270845999.78313255)
+# ('ps ', 269791701.4117647)
+
+
+
 # SYSTEM LEVEL PROCESS MONITORING
 # This code does most of the heavy lifting for process monitoring.
 # The amount of events it raises shoudl be constrained by the PIDs that run during pipeline execution.
@@ -171,8 +181,8 @@ TRACEPOINT_PROBE(sched, sched_switch) {
     // Get PID and command
     key.pid = args->prev_pid;
 
-    if (!check_rate_limit(key.pid))
-        return 0;
+    //if (!check_rate_limit(key.pid))
+    //    return 0;
 
     bpf_probe_read_kernel(&key.comm, sizeof(key.comm), args->prev_comm);
     
@@ -297,23 +307,23 @@ db.execute("""
         command VARCHAR,
         type VARCHAR,
         metric UBIGINT,
-        arguments VARCHAR
+        full_command VARCHAR
     )
 """)
 
 print("%-9s %-6s %-6s %-16s %-25s %s %s" % ("TIME", "PID", "PPID", "COMM", "EVENT", "METRIC", "DETAILS"))
 
 def store_event(time, pid, ppid, command, type, metric, details):
-    # print("%-9d %-6d %-6d %-16s %-25s %d %s" % (
-    #     time,
-    #     pid,
-    #     ppid,
-    #     command,
-    #     type,
-    #     metric,
-    #     details)   
-    # )
-    db.execute(f" INSERT INTO metrics_stream VALUES (DEFAULT, {time}, {pid}, {ppid}, '{command}', '{type}', {metric}, '{details}')")
+    print("%-9d %-6d %-6d %-16s %-25s %d %s" % (
+        time,
+        pid,
+        ppid,
+        command,
+        type,
+        metric,
+        details)   
+    )
+    db.execute(f" INSERT INTO metrics_stream VALUES (DEFAULT, {time}, {pid}, {ppid}, '{command}', '{type}', {metric}, '{command} {details}')")
 
 
 def process_event(cpu, data, size):
@@ -332,9 +342,9 @@ def process_event(cpu, data, size):
         elif hasattr(event, 'retval'):
             if event.pid in partial_commands:
                 cmd_info = partial_commands[event.pid]
-                full_command = ' '.join(cmd_info['parts'])
-                store_event(int(time()), event.pid, cmd_info['ppid'], cmd_info['comm'], "EXECVE", 0, full_command)
-                del partial_commands[event.pid]
+                cmd_info['full_command'] = ' '.join(cmd_info['parts'])
+                store_event(int(time()), event.pid, cmd_info['ppid'], cmd_info['comm'], "EXECVE", 0, cmd_info['full_command'])
+                # del partial_commands[event.pid]
     else:
         # Handle process lifecycle events
         if not all(hasattr(event, attr) for attr in ['pid', 'ppid', 'comm']):
@@ -343,13 +353,18 @@ def process_event(cpu, data, size):
             comm = event.comm.decode()
         except:
             comm = "<decode error>"
+
+
+
+
         if event.end_time:
+            full_command = ""
+            if event.pid in partial_commands and 'full_command' in partial_commands[event.pid]:
+                full_command = partial_commands[event.pid]['full_command']
             duration = (event.end_time - event.start_time)
-            # duration_ms = duration / 1000000
-            store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "EXIT", duration, "")
+            store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "EXIT", duration, full_command)
         elif event.mem_size:
             size = event.mem_size;
-            # size_kb = event.mem_size / 1024
             store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "MEM", size, "")
         elif event.cpu_time:
             cpu_allocation = event.cpu_time
