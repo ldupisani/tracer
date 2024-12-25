@@ -23,6 +23,36 @@ bpf_code = """
 #include <linux/mm_types.h>
 #include <linux/mm.h>
 
+// FILTERING HELPER FUNCTIONS
+
+static __always_inline bool str_starts_with(const char *str, const char *prefix) {
+    char c1, c2;
+    for (int i = 0; i < 8; i++) {  // Limited comparison due to BPF verifier
+        c1 = str[i];
+        c2 = prefix[i];
+        if (c2 == 0) return true;   // Reached end of prefix
+        if (c1 != c2) return false; // Mismatch
+        if (c1 == 0) return false;  // Reached end of str
+    }
+    return true;
+}
+
+static __always_inline bool is_shell_script(const char *str) {
+    char c;
+    #pragma unroll
+    for (int i = 0; i < TASK_COMM_LEN - 3; i++) {
+        if (str[i] == '.' && str[i+1] == 's' && str[i+2] == 'h')
+            return true;
+        if (str[i] == 0)
+            return false;
+    }
+    return false;
+}
+
+static __always_inline bool should_filter_command(const char *comm) {
+    return str_starts_with(comm, "ps") || is_shell_script(comm);
+}
+
 // PROCESS LIFECYCLE MONITORING
 
 #define ARGSIZE  128
@@ -53,6 +83,10 @@ TRACEPOINT_PROBE(sched, sched_process_exec) {
     data.start_time = bpf_ktime_get_ns();
     data.cpu_time = 0;
     bpf_get_current_comm(&data.comm, sizeof(data.comm));
+
+    if (should_filter_command(data.comm)) {
+        return 0;
+    }   
     
     struct task_struct *task;
     task = (struct task_struct *)bpf_get_current_task();
@@ -74,6 +108,10 @@ TRACEPOINT_PROBE(sched, sched_process_exit) {
         data.end_time = bpf_ktime_get_ns();
         data.start_time = *start_ts;
         bpf_get_current_comm(&data.comm, sizeof(data.comm));
+
+        if (should_filter_command(data.comm)) {
+            return 0;
+        }  
         
         struct task_struct *task;
         task = (struct task_struct *)bpf_get_current_task();
@@ -97,6 +135,11 @@ int syscall__execve(struct pt_regs *ctx,
     task = (struct task_struct *)bpf_get_current_task();
     data.ppid = task->real_parent->tgid;
     bpf_get_current_comm(&data.comm, sizeof(data.comm));
+
+    if (should_filter_command(data.comm)) {
+        return 0;
+    } 
+
     bpf_probe_read_user_str(&data.argdata, sizeof(data.argdata), (void *)filename);
     events.perf_submit(ctx, &data, sizeof(data));
     
