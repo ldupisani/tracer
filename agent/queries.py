@@ -17,7 +17,7 @@ ORDER BY average_execution_time DESC
 for row in result:
     print(row)
 
-print("\nGet the top 3 commands with the highest CPU time")
+print("\nGet the top 3 commands with the highest CPU time (This is in CPU milliseconds)")
 
 
 # TODO: Total CPU time doesn't look right in terms of CPU hours. Need to figure out how to calculate it correctly
@@ -26,7 +26,7 @@ result = db.execute(
 """
 SELECT 
     command,
-    ROUND(SUM(top_cpu_time) / (1000.0 * 60.0 * 60.0), 2) as total_cpu_time
+    ROUND(SUM(top_cpu_time) / (1000.0 * 60.0 * 60.0), 10) as total_cpu_time
 FROM (
     SELECT 
         command, 

@@ -108,6 +108,14 @@ When the monitor is terminated it writes the metrics to a parquet file for furth
 
 # 3. Query Validation
 
+The basic query function logic have been added. I changed the tracing structure a bit to ensure that there is a numerical metric for each event.
+
+I also added some filtering to exlude traces for shell scripts. This is done directly in the BPF code to reduce the amount of events before it gets pushed to user space.
+
 ## Execution Time Analysis
 
+Since the data is pretty well formatted at the outset this is a really basic query grouped on the full command and aggregating the duration metric that is output on an EXIT event.
+
 ## Query Validation
+
+This is also a fairly simple query. It has an inner query to find the top CPU usage for each PID during its exection. It then gets aggregates this top value for each execution to compute the total CPU time at the command/binary level without the additional arguments.
