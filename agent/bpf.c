@@ -10,6 +10,10 @@
 
 // FILTERING HELPER FUNCTIONS
 
+// These are just some basic examples of how we can filter out certain commands
+// We could retrieve a list of commands to filter from user space and load them into the BPF program.
+// It is useful to do the filtering at this stage to create more efficient code.
+
 static __always_inline bool str_starts_with(const char *str, const char *prefix) {
     char c1, c2;
     for (int i = 0; i < 8; i++) {  // Limited comparison due to BPF verifier
@@ -205,6 +209,11 @@ TRACEPOINT_PROBE(sched, sched_switch) {
 
 
 // MEMORY MONITORING
+
+// I have added this addition hash to demonstrate an additional metric to track.
+// However for the purposes of the project we don't need this information.
+// But we could split this bpf program into multiple parts, and only load the parts we need
+// for additional metrics.
 
 struct mem_info {
     u64 total_size;    

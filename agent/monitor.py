@@ -19,42 +19,7 @@ b.attach_kretprobe(event=b.get_syscall_fnname("execve"), fn_name="do_ret_sys_exe
 
 partial_commands = {}
 
-# SEQUENCED EVENT LOG
-
-# We are using an in memory duckcb database to store all trace events in sequence.
-# This will be output to parquet files for ingestion and and analysis in further stages of the pipeline.
-
-# Create a DuckDB connection
-db = duckdb.connect()
-
-# Create a table that will store our process lifecycle events
-db.execute("CREATE SEQUENCE id_sequence START 1")
-db.execute("""
-    CREATE TABLE metrics_stream (
-        id INTEGER DEFAULT nextval('id_sequence'),
-        pid UINTEGER,
-        ppid UINTEGER,
-        time UBIGINT,
-        command VARCHAR,
-        type VARCHAR,
-        metric UBIGINT,
-        full_command VARCHAR
-    )
-""")
-
-print("%-9s %-6s %-6s %-16s %-25s %s %s" % ("TIME", "PID", "PPID", "COMM", "EVENT", "METRIC", "DETAILS"))
-
-def store_event(time, pid, ppid, command, type, metric, details):
-    print("%-9d %-6d %-6d %-16s %-25s %d %s" % (
-        time,
-        pid,
-        ppid,
-        command,
-        type,
-        metric,
-        details)   
-    )
-    db.execute(f" INSERT INTO metrics_stream VALUES (DEFAULT, {time}, {pid}, {ppid}, '{command}', '{type}', {metric}, '{command} {details}')")
+# TRANSFORMATION 
 
 def get_cpu_time(process_id):
     cpu_time = b.get_table("cpu_time")
@@ -101,6 +66,51 @@ def process_event(cpu, data, size):
             store_event(int(time()), event.pid, event.ppid, event.comm.decode(), "EXIT", duration, full_command)            
         else:
             store_event(int(time()), event.pid, event.ppid, comm, "START", 0, "")
+
+
+# SEQUENCED EVENT LOG
+
+# We are using an in memory duckcb database to store all trace events in sequence.
+# This will be used to generate metrics and insights in the next stage of the pipeline.
+
+db = duckdb.connect()
+
+# Create a table that will store our process lifecycle events
+db.execute("CREATE SEQUENCE id_sequence START 1")
+db.execute("""
+    CREATE TABLE metrics_stream (
+        id INTEGER DEFAULT nextval('id_sequence'),
+        pid UINTEGER,
+        ppid UINTEGER,
+        time UBIGINT,
+        command VARCHAR,
+        type VARCHAR,
+        metric UBIGINT,
+        full_command VARCHAR
+    )
+""")
+
+
+print("%-9s %-6s %-6s %-16s %-25s %s %s" % ("TIME", "PID", "PPID", "COMM", "EVENT", "METRIC", "DETAILS"))
+
+def store_event(time, pid, ppid, command, type, metric, details):
+    print("%-9d %-6d %-6d %-16s %-25s %d %s" % (
+        time,
+        pid,
+        ppid,
+        command,
+        type,
+        metric,
+        details)   
+    )
+    db.execute(f" INSERT INTO metrics_stream VALUES (DEFAULT, {time}, {pid}, {ppid}, '{command}', '{type}', {metric}, '{command} {details}')")
+
+
+# PERSISTENCE
+
+# This will be output to parquet files for ingestion and and analysis in further stages of the pipeline.
+# Currently the file is written to disk when the monitoring process exits, but this can be
+# changed to stream the data to a remote storage system.
 
 def persist_metrics():
     db.execute("COPY metrics_stream TO 'metrics_stream.parquet' (FORMAT 'parquet', CODEC 'zstd')")
