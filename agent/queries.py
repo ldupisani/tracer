@@ -19,9 +19,6 @@ for row in result:
 
 print("\nGet the top 3 commands with the highest CPU time (This is in CPU milliseconds)")
 
-
-# TODO: Total CPU time doesn't look right in terms of CPU hours. Need to figure out how to calculate it correctly
-
 result = db.execute(
 """
 SELECT 
