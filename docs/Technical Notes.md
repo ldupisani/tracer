@@ -1,4 +1,4 @@
-# Design Decision
+# Design Decisions
 
 I spent some time getting my bearings with eBPF and its support on various Linux distros. I considered using Rust, but thought it would be better to get a working prototype done before delving into that.
 
